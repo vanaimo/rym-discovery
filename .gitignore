@@ -1,0 +1,5 @@
+node_modules/
+.chrome_profile/
+.chrome_user_data/
+.pw_user_data/
+*.log
