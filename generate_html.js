@@ -7,7 +7,7 @@ function generateHtml(releases, metadata = {}) {
     const bandcampCount = releases.filter(r => r.bandcampUrl).length;
     const uniqueCurators = new Set();
     const uniqueGenres = new Set();
-    const uniquePeriods = new Map(); // key -> label
+    const uniquePeriods = new Map();
 
     const monthNames = [
         'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
@@ -23,7 +23,6 @@ function generateHtml(releases, metadata = {}) {
             });
         }
 
-        // Extract period for clustering
         if (r.releaseDate) {
             const parts = r.releaseDate.split('/');
             if (parts.length === 3) {
@@ -316,15 +315,19 @@ function generateHtml(releases, metadata = {}) {
             return item.addedOrder ? (1000000 - item.addedOrder) : 0;
         }
 
-        function cleanCoverUrl(cover) {
-            if (!cover || cover.includes('blocked_art') || cover.includes('blank.png')) {
-                return 'https://via.placeholder.com/300x300/1e293b/94a3b8?text=No+Cover';
+        function formatCoverUrl(url) {
+            if (!url || url.includes('blocked_art') || url.includes('blank.png') || url.includes('placeholder')) {
+                return 'https://images.weserv.nl/?url=https%3A%2F%2Fvia.placeholder.com%2F400x400%2F1e293b%2F94a3b8%3Ftext%3DNo%2BCover&w=400&output=webp';
             }
-            return cover;
+            // If it's a sonemic URL, proxy through wsrv.nl to bypass hotlink block and optimize to WebP
+            if (url.includes('cdn.sonemic.net')) {
+                return 'https://wsrv.nl/?url=' + encodeURIComponent(url) + '&w=450&output=webp';
+            }
+            return url;
         }
 
         function renderCard(item) {
-            const coverUrl = cleanCoverUrl(item.cover);
+            const coverUrl = formatCoverUrl(item.cover);
             const genres = item.genre ? item.genre.split(',').map(g => g.trim()).filter(Boolean) : [];
             const rymUrl = item.rymUrl ? (item.rymUrl.startsWith('http') ? item.rymUrl : 'https://rateyourmusic.com' + item.rymUrl) : '#';
             const artistUrl = item.artistUrl ? (item.artistUrl.startsWith('http') ? item.artistUrl : 'https://rateyourmusic.com' + item.artistUrl) : ('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent(item.artist) + '&type=a');
@@ -385,7 +388,7 @@ function generateHtml(releases, metadata = {}) {
                         <img src="\${escapeHtml(coverUrl)}" alt="\${escapeHtml(item.title)}" 
                              loading="lazy"
                              referrerpolicy="no-referrer"
-                             onerror="this.onerror=null; this.src='https://via.placeholder.com/300x300/1e293b/94a3b8?text=No+Cover';"
+                             onerror="this.onerror=null; this.src='https://wsrv.nl/?url=' + encodeURIComponent('https://via.placeholder.com/400x400/1e293b/94a3b8?text=No+Cover');"
                              class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105">
                         
                         \${newBadge}
