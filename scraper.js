@@ -8,6 +8,7 @@ const { generateHtml } = require('./generate_html');
 const CUTOFF_DATE = new Date('2025-11-05T00:00:00Z'); // 05/11/2025
 const DATA_DIR = path.join(__dirname, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
+const RELEASES_FILE = path.join(DATA_DIR, 'releases.json');
 const OUTPUT_HTML = path.join(__dirname, 'index.html');
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -331,6 +332,18 @@ async function runScraper() {
     const allReleases = Array.from(releasesMap.values());
     console.log(`\nTotale album unici estratti dopo deduplicazione: ${allReleases.length}`);
 
+    // SAFETY CHECK: If no releases were extracted (e.g. Cloudflare IP block in CI), DO NOT overwrite existing dataset!
+    if (allReleases.length === 0) {
+        console.warn('\n[!] ATTENZIONE: Nessun album estratto durante la scansione (possibile blocco IP/Cloudflare). I dati esistenti vengono preservati.');
+        if (fs.existsSync(RELEASES_FILE)) {
+            const existing = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8'));
+            const htmlContent = generateHtml(existing, { lastUpdated: new Date().toLocaleString('it-IT') });
+            fs.writeFileSync(OUTPUT_HTML, htmlContent, 'utf8');
+            console.log(`Dashboard ripristinata con i ${existing.length} album precedenti.`);
+        }
+        return;
+    }
+
     // Load previous state
     let previousState = {};
     if (fs.existsSync(STATE_FILE)) {
@@ -393,7 +406,7 @@ async function runScraper() {
     });
 
     fs.writeFileSync(STATE_FILE, JSON.stringify(newState, null, 2), 'utf8');
-    fs.writeFileSync(path.join(DATA_DIR, 'releases.json'), JSON.stringify(allReleases, null, 2), 'utf8');
+    fs.writeFileSync(RELEASES_FILE, JSON.stringify(allReleases, null, 2), 'utf8');
 
     // Generate HTML dashboard
     const htmlContent = generateHtml(allReleases, {
