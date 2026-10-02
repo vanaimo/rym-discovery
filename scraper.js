@@ -15,37 +15,11 @@ if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// Caches to avoid redundant API calls
-const genreCache = new Map();
+// Caches for Bandcamp queries
 const bandcampCache = new Map();
+const bandcampArtistTagCache = new Map();
 
-async function fetchGenreDeezer(artist, album) {
-    const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
-    if (genreCache.has(cacheKey)) return genreCache.get(cacheKey);
-
-    try {
-        const query = encodeURIComponent(`artist:"${artist}" album:"${album}"`);
-        const res = await axios.get(`https://api.deezer.com/search/album?q=${query}`, { timeout: 4000 });
-        if (res.data && res.data.data && res.data.data.length > 0) {
-            const item = res.data.data[0];
-            const detail = await axios.get(`https://api.deezer.com/album/${item.id}`, { timeout: 4000 });
-            const genres = detail.data.genres && detail.data.genres.data ? detail.data.genres.data.map(g => g.name).join(', ') : '';
-            const result = {
-                genre: genres,
-                deezerCover: item.cover_big || item.cover_xl
-            };
-            genreCache.set(cacheKey, result);
-            return result;
-        }
-    } catch (e) {
-        // ignore
-    }
-    const emptyResult = { genre: '', deezerCover: null };
-    genreCache.set(cacheKey, emptyResult);
-    return emptyResult;
-}
-
-async function getRealBandcampUrl(artist, album) {
+async function getBandcampData(artist, album) {
     const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
     if (bandcampCache.has(cacheKey)) return bandcampCache.get(cacheKey);
 
@@ -64,8 +38,13 @@ async function getRealBandcampUrl(artist, album) {
             const normAlbum = album.toLowerCase().replace(/[^\w\s]/g, '');
 
             let bestMatch = null;
+            let tags = [];
 
             for (const item of res.data.results) {
+                if (item.tag_names && Array.isArray(item.tag_names) && item.tag_names.length > 0 && tags.length === 0) {
+                    tags = item.tag_names;
+                }
+
                 const itemName = (item.name || item.album_name || '').toLowerCase().replace(/[^\w\s]/g, '');
                 const bandName = (item.band_name || '').toLowerCase().replace(/[^\w\s]/g, '');
 
@@ -91,15 +70,57 @@ async function getRealBandcampUrl(artist, album) {
                         cleanUrl = 'https://' + parts[parts.length - 1];
                     }
                 }
-                bandcampCache.set(cacheKey, cleanUrl);
-                return cleanUrl;
+
+                let formattedTags = '';
+                if (tags.length > 0) {
+                    formattedTags = tags.slice(0, 3).map(t => t.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')).join(', ');
+                }
+
+                const result = {
+                    url: cleanUrl,
+                    genre: formattedTags
+                };
+                bandcampCache.set(cacheKey, result);
+                return result;
             }
         }
     } catch (e) {
         // ignore
     }
-    bandcampCache.set(cacheKey, null);
-    return null;
+
+    const empty = { url: null, genre: '' };
+    bandcampCache.set(cacheKey, empty);
+    return empty;
+}
+
+async function getBandcampArtistTags(artist) {
+    const cacheKey = artist.toLowerCase().trim();
+    if (bandcampArtistTagCache.has(cacheKey)) return bandcampArtistTagCache.get(cacheKey);
+
+    try {
+        const query = encodeURIComponent(artist);
+        const res = await axios.get(`https://bandcamp.com/api/fuzzysearch/2/app_autocomplete?q=${query}`, {
+            headers: {
+                'User-Agent': 'Bandcamp/3.0.0 (Android 14; Mobile)',
+                'Accept': 'application/json'
+            },
+            timeout: 5000
+        });
+
+        if (res.data && res.data.results) {
+            for (const item of res.data.results) {
+                if (item.type === 'b' && item.tag_names && item.tag_names.length > 0) {
+                    const tags = item.tag_names.slice(0, 3).map(t => t.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')).join(', ');
+                    bandcampArtistTagCache.set(cacheKey, tags);
+                    return tags;
+                }
+            }
+        }
+    } catch (e) {
+        // ignore
+    }
+    bandcampArtistTagCache.set(cacheKey, '');
+    return '';
 }
 
 function normalizeKey(artist, album) {
@@ -332,14 +353,13 @@ async function runScraper() {
     const allReleases = Array.from(releasesMap.values());
     console.log(`\nTotale album unici estratti dopo deduplicazione: ${allReleases.length}`);
 
-    // SAFETY CHECK: If no releases were extracted (e.g. Cloudflare IP block in CI), DO NOT overwrite existing dataset!
+    // SAFETY CHECK: If no releases were extracted, DO NOT overwrite existing dataset
     if (allReleases.length === 0) {
-        console.warn('\n[!] ATTENZIONE: Nessun album estratto durante la scansione (possibile blocco IP/Cloudflare). I dati esistenti vengono preservati.');
+        console.warn('\n[!] ATTENZIONE: Nessun album estratto. I dati esistenti vengono preservati.');
         if (fs.existsSync(RELEASES_FILE)) {
             const existing = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8'));
             const htmlContent = generateHtml(existing, { lastUpdated: new Date().toLocaleString('it-IT') });
             fs.writeFileSync(OUTPUT_HTML, htmlContent, 'utf8');
-            console.log(`Dashboard ripristinata con i ${existing.length} album precedenti.`);
         }
         return;
     }
@@ -354,35 +374,31 @@ async function runScraper() {
 
     const isFirstRun = Object.keys(previousState).length === 0;
 
-    console.log('\n[4/4] Arricchimento generi e ricerca reale Bandcamp / Spotify...');
-    const batchSize = 12;
+    console.log('\n[4/4] Interrogazione esclusiva Bandcamp (Link e Tag/Generi)...');
+    const batchSize = 15;
     for (let i = 0; i < allReleases.length; i += batchSize) {
         const chunk = allReleases.slice(i, i + batchSize);
         await Promise.all(chunk.map(async (item) => {
             if (previousState[item.id]) {
                 item.isNew = false;
                 item.firstSeen = previousState[item.id].firstSeen;
-                if (previousState[item.id].genre) {
-                    item.genre = previousState[item.id].genre;
-                }
-                if (previousState[item.id].bandcampUrl) {
-                    item.bandcampUrl = previousState[item.id].bandcampUrl;
-                }
+                if (previousState[item.id].genre) item.genre = previousState[item.id].genre;
+                if (previousState[item.id].bandcampUrl) item.bandcampUrl = previousState[item.id].bandcampUrl;
             } else {
                 item.isNew = !isFirstRun;
             }
 
-            // Deezer genre
-            if (!item.genre) {
-                const deezerInfo = await fetchGenreDeezer(item.artist, item.title);
-                if (deezerInfo.genre) item.genre = deezerInfo.genre;
-                if (!item.cover && deezerInfo.deezerCover) item.cover = deezerInfo.deezerCover;
-            }
-
-            // Real Bandcamp URL
-            if (item.bandcampUrl === undefined || item.bandcampUrl === null || item.bandcampUrl.includes('/search?')) {
-                const realBcUrl = await getRealBandcampUrl(item.artist, item.title);
-                item.bandcampUrl = realBcUrl;
+            // Query ONLY Bandcamp
+            if (!item.bandcampUrl || !item.genre) {
+                const bcData = await getBandcampData(item.artist, item.title);
+                item.bandcampUrl = bcData.url;
+                if (bcData.genre) {
+                    item.genre = bcData.genre;
+                } else if (item.bandcampUrl) {
+                    // Check artist tag on Bandcamp
+                    const artistTags = await getBandcampArtistTags(item.artist);
+                    if (artistTags) item.genre = artistTags;
+                }
             }
 
             item.spotifyUrl = `https://open.spotify.com/search/${encodeURIComponent(item.artist + ' ' + item.title)}`;
@@ -424,7 +440,41 @@ async function runScraper() {
     console.log(`=====================================================\n`);
 }
 
-module.exports = { runScraper, fetchGenreDeezer, getRealBandcampUrl };
+// Update current dataset with ONLY Bandcamp tags/genres
+async function enrichWithBandcampOnly() {
+    if (!fs.existsSync(RELEASES_FILE)) return;
+    console.log('Aggiornamento in corso: Generi e Link derivati esclusivamente da Bandcamp...');
+    const releases = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8'));
+
+    const batchSize = 15;
+    for (let i = 0; i < releases.length; i += batchSize) {
+        const chunk = releases.slice(i, i + batchSize);
+        await Promise.all(chunk.map(async (item) => {
+            const bcData = await getBandcampData(item.artist, item.title);
+            item.bandcampUrl = bcData.url;
+            if (bcData.genre) {
+                item.genre = bcData.genre;
+            } else if (item.bandcampUrl) {
+                const artistTags = await getBandcampArtistTags(item.artist);
+                item.genre = artistTags || '';
+            } else {
+                item.genre = '';
+            }
+
+            item.spotifyUrl = `https://open.spotify.com/search/${encodeURIComponent(item.artist + ' ' + item.title)}`;
+        }));
+        if ((i + batchSize) % 200 === 0 || i + batchSize >= releases.length) {
+            console.log(`Elaborati ${Math.min(i + batchSize, releases.length)} / ${releases.length} album...`);
+        }
+    }
+
+    fs.writeFileSync(RELEASES_FILE, JSON.stringify(releases, null, 2), 'utf8');
+    const html = generateHtml(releases, { lastUpdated: new Date().toLocaleString('it-IT') });
+    fs.writeFileSync(OUTPUT_HTML, html, 'utf8');
+    console.log('Dataset aggiornato con generi 100% Bandcamp!');
+}
+
+module.exports = { runScraper, enrichWithBandcampOnly, getBandcampData, getBandcampArtistTags };
 
 if (require.main === module) {
     runScraper().catch(console.error);
