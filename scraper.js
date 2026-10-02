@@ -15,9 +15,69 @@ if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// Caches for Bandcamp queries
+// Caches
 const bandcampCache = new Map();
 const bandcampArtistTagCache = new Map();
+const dateCache = new Map();
+
+function formatDateToIT(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) {
+            const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+            if (/^\d{4}$/.test(dateStr.trim())) return dateStr.trim();
+            return dateStr;
+        }
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        return `${dd}/${mm}/${yyyy}`;
+    } catch (e) {
+        return dateStr;
+    }
+}
+
+async function getFullReleaseDate(artist, album, currentYear) {
+    const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
+    if (dateCache.has(cacheKey)) return dateCache.get(cacheKey);
+
+    // 1. Fast iTunes lookup (exact day/month/year)
+    try {
+        const query = encodeURIComponent(`${artist} ${album}`);
+        const res = await axios.get(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`, { timeout: 4000 });
+        if (res.data && res.data.results && res.data.results.length > 0) {
+            const item = res.data.results[0];
+            if (item.releaseDate) {
+                const formatted = formatDateToIT(item.releaseDate);
+                dateCache.set(cacheKey, formatted);
+                return formatted;
+            }
+        }
+    } catch (e) {}
+
+    // 2. MusicBrainz lookup
+    try {
+        const query = encodeURIComponent(`release:"${album}" AND artist:"${artist}"`);
+        const res = await axios.get(`https://musicbrainz.org/ws/2/release/?query=${query}&fmt=json&limit=1`, {
+            headers: { 'User-Agent': 'RYMDiscovery/1.0.0 ( contact@example.com )' },
+            timeout: 4000
+        });
+        if (res.data && res.data.releases && res.data.releases.length > 0) {
+            const rel = res.data.releases[0];
+            if (rel.date) {
+                const formatted = formatDateToIT(rel.date);
+                dateCache.set(cacheKey, formatted);
+                return formatted;
+            }
+        }
+    } catch (e) {}
+
+    const fallback = currentYear || '';
+    dateCache.set(cacheKey, fallback);
+    return fallback;
+}
 
 async function getBandcampData(artist, album) {
     const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
@@ -190,6 +250,7 @@ function parseListHtml(html, listMeta, releasesMap, globalCounter) {
                     artistUrl,
                     title,
                     year: relDate,
+                    releaseDate: relDate, // will be enriched to GG/MM/AAAA
                     cover: coverSrc,
                     rymUrl,
                     bandcampUrl: null,
@@ -374,7 +435,7 @@ async function runScraper() {
 
     const isFirstRun = Object.keys(previousState).length === 0;
 
-    console.log('\n[4/4] Interrogazione esclusiva Bandcamp (Link e Tag/Generi)...');
+    console.log('\n[4/4] Risoluzione date GG/MM/AAAA e interrogazione Bandcamp...');
     const batchSize = 15;
     for (let i = 0; i < allReleases.length; i += batchSize) {
         const chunk = allReleases.slice(i, i + batchSize);
@@ -384,21 +445,26 @@ async function runScraper() {
                 item.firstSeen = previousState[item.id].firstSeen;
                 if (previousState[item.id].genre) item.genre = previousState[item.id].genre;
                 if (previousState[item.id].bandcampUrl) item.bandcampUrl = previousState[item.id].bandcampUrl;
+                if (previousState[item.id].releaseDate) item.releaseDate = previousState[item.id].releaseDate;
             } else {
                 item.isNew = !isFirstRun;
             }
 
-            // Query ONLY Bandcamp
+            // Bandcamp Data
             if (!item.bandcampUrl || !item.genre) {
                 const bcData = await getBandcampData(item.artist, item.title);
                 item.bandcampUrl = bcData.url;
                 if (bcData.genre) {
                     item.genre = bcData.genre;
                 } else if (item.bandcampUrl) {
-                    // Check artist tag on Bandcamp
                     const artistTags = await getBandcampArtistTags(item.artist);
                     if (artistTags) item.genre = artistTags;
                 }
+            }
+
+            // Release Date (GG/MM/AAAA)
+            if (!item.releaseDate || /^\d{4}$/.test(item.releaseDate)) {
+                item.releaseDate = await getFullReleaseDate(item.artist, item.title, item.year);
             }
 
             item.spotifyUrl = `https://open.spotify.com/search/${encodeURIComponent(item.artist + ' ' + item.title)}`;
@@ -414,6 +480,7 @@ async function runScraper() {
             artistUrl: r.artistUrl,
             title: r.title,
             genre: r.genre,
+            releaseDate: r.releaseDate,
             bandcampUrl: r.bandcampUrl,
             latestItemId: r.latestItemId,
             firstSeen: r.firstSeen,
@@ -440,41 +507,32 @@ async function runScraper() {
     console.log(`=====================================================\n`);
 }
 
-// Update current dataset with ONLY Bandcamp tags/genres
-async function enrichWithBandcampOnly() {
+// Quick enrich function for release dates
+async function enrichReleaseDates() {
     if (!fs.existsSync(RELEASES_FILE)) return;
-    console.log('Aggiornamento in corso: Generi e Link derivati esclusivamente da Bandcamp...');
+    console.log('Risoluzione date di uscita GG/MM/AAAA per il dataset...');
     const releases = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8'));
 
-    const batchSize = 15;
+    const batchSize = 20;
     for (let i = 0; i < releases.length; i += batchSize) {
         const chunk = releases.slice(i, i + batchSize);
         await Promise.all(chunk.map(async (item) => {
-            const bcData = await getBandcampData(item.artist, item.title);
-            item.bandcampUrl = bcData.url;
-            if (bcData.genre) {
-                item.genre = bcData.genre;
-            } else if (item.bandcampUrl) {
-                const artistTags = await getBandcampArtistTags(item.artist);
-                item.genre = artistTags || '';
-            } else {
-                item.genre = '';
+            if (!item.releaseDate || /^\d{4}$/.test(item.releaseDate)) {
+                item.releaseDate = await getFullReleaseDate(item.artist, item.title, item.year);
             }
-
-            item.spotifyUrl = `https://open.spotify.com/search/${encodeURIComponent(item.artist + ' ' + item.title)}`;
         }));
-        if ((i + batchSize) % 200 === 0 || i + batchSize >= releases.length) {
-            console.log(`Elaborati ${Math.min(i + batchSize, releases.length)} / ${releases.length} album...`);
+        if ((i + batchSize) % 300 === 0 || i + batchSize >= releases.length) {
+            console.log(`Elaborate date per ${Math.min(i + batchSize, releases.length)} / ${releases.length} album...`);
         }
     }
 
     fs.writeFileSync(RELEASES_FILE, JSON.stringify(releases, null, 2), 'utf8');
     const html = generateHtml(releases, { lastUpdated: new Date().toLocaleString('it-IT') });
     fs.writeFileSync(OUTPUT_HTML, html, 'utf8');
-    console.log('Dataset aggiornato con generi 100% Bandcamp!');
+    console.log('Dataset e index.html aggiornati con le date di uscita GG/MM/AAAA!');
 }
 
-module.exports = { runScraper, enrichWithBandcampOnly, getBandcampData, getBandcampArtistTags };
+module.exports = { runScraper, enrichReleaseDates, getFullReleaseDate, getBandcampData, getBandcampArtistTags };
 
 if (require.main === module) {
     runScraper().catch(console.error);
