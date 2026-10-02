@@ -54,6 +54,7 @@ function generateHtml(releases, metadata = {}) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>RateYourMusic - Nuove Aggiunte & Liste Consigliate</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -315,8 +316,15 @@ function generateHtml(releases, metadata = {}) {
             return item.addedOrder ? (1000000 - item.addedOrder) : 0;
         }
 
+        function cleanCoverUrl(cover) {
+            if (!cover || cover.includes('blocked_art') || cover.includes('blank.png')) {
+                return 'https://via.placeholder.com/300x300/1e293b/94a3b8?text=No+Cover';
+            }
+            return cover;
+        }
+
         function renderCard(item) {
-            const coverUrl = item.cover || 'https://via.placeholder.com/300x300/1e293b/94a3b8?text=No+Cover';
+            const coverUrl = cleanCoverUrl(item.cover);
             const genres = item.genre ? item.genre.split(',').map(g => g.trim()).filter(Boolean) : [];
             const rymUrl = item.rymUrl ? (item.rymUrl.startsWith('http') ? item.rymUrl : 'https://rateyourmusic.com' + item.rymUrl) : '#';
             const artistUrl = item.artistUrl ? (item.artistUrl.startsWith('http') ? item.artistUrl : 'https://rateyourmusic.com' + item.artistUrl) : ('https://rateyourmusic.com/search?searchterm=' + encodeURIComponent(item.artist) + '&type=a');
@@ -376,6 +384,7 @@ function generateHtml(releases, metadata = {}) {
                     <div class="relative overflow-hidden bg-slate-950 group aspect-square">
                         <img src="\${escapeHtml(coverUrl)}" alt="\${escapeHtml(item.title)}" 
                              loading="lazy"
+                             referrerpolicy="no-referrer"
                              onerror="this.onerror=null; this.src='https://via.placeholder.com/300x300/1e293b/94a3b8?text=No+Cover';"
                              class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105">
                         
@@ -486,14 +495,12 @@ function generateHtml(releases, metadata = {}) {
                     const timeB = parseReleaseDateTimestamp(b.releaseDate) || (parseInt(b.year, 10) * 100000000) || 0;
                     return timeA - timeB;
                 } else {
-                    // default: recent-added (most recently added to lists first)
                     const metricA = getLatestAdditionMetric(a);
                     const metricB = getLatestAdditionMetric(b);
                     return metricB - metricA;
                 }
             });
 
-            // Render logic: Grid vs Cluster Grouping
             const container = document.getElementById('albumsContainer');
             const empty = document.getElementById('emptyState');
             const countElem = document.getElementById('displayedCount');
@@ -507,7 +514,6 @@ function generateHtml(releases, metadata = {}) {
                 empty.classList.add('hidden');
 
                 if (clusterViewMode) {
-                    // Group by Date Cluster
                     const clustersMap = new Map();
                     filtered.forEach(item => {
                         const cluster = getReleaseClusterKey(item.releaseDate, item.year);
@@ -536,7 +542,6 @@ function generateHtml(releases, metadata = {}) {
                     }
                     container.innerHTML = clusterHtml;
                 } else {
-                    // Standard Flat Grid
                     container.innerHTML = \`<div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">\${filtered.map(renderCard).join('')}</div>\`;
                 }
             }
