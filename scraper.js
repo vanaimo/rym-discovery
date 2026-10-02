@@ -19,6 +19,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const bandcampCache = new Map();
 const bandcampArtistTagCache = new Map();
 const dateCache = new Map();
+const hdCoverCache = new Map();
 
 function formatDateToIT(dateStr) {
     if (!dateStr) return '';
@@ -43,7 +44,7 @@ async function getFullReleaseDate(artist, album, currentYear) {
     const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
     if (dateCache.has(cacheKey)) return dateCache.get(cacheKey);
 
-    // 1. Fast iTunes lookup (exact day/month/year)
+    // 1. iTunes lookup (exact day/month/year)
     try {
         const query = encodeURIComponent(`${artist} ${album}`);
         const res = await axios.get(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`, { timeout: 4000 });
@@ -77,6 +78,46 @@ async function getFullReleaseDate(artist, album, currentYear) {
     const fallback = currentYear || '';
     dateCache.set(cacheKey, fallback);
     return fallback;
+}
+
+async function getHDCover(artist, album, currentCover) {
+    const cacheKey = `${artist.toLowerCase()}___${album.toLowerCase()}`;
+    if (hdCoverCache.has(cacheKey)) return hdCoverCache.get(cacheKey);
+
+    // 1. Check Bandcamp HD Cover (_10.jpg is full resolution)
+    try {
+        const query = encodeURIComponent(`${artist} ${album}`);
+        const res = await axios.get(`https://bandcamp.com/api/fuzzysearch/2/app_autocomplete?q=${query}`, {
+            headers: { 'User-Agent': 'Bandcamp/3.0.0 (Android 14; Mobile)' },
+            timeout: 4000
+        });
+        if (res.data && res.data.results && res.data.results.length > 0) {
+            for (const item of res.data.results) {
+                if (item.img && (item.type === 'a' || item.type === 't')) {
+                    const hdUrl = item.img.replace(/_\d+\.jpg$/, '_10.jpg');
+                    hdCoverCache.set(cacheKey, hdUrl);
+                    return hdUrl;
+                }
+            }
+        }
+    } catch (e) {}
+
+    // 2. Check iTunes HD Cover (600x600)
+    try {
+        const query = encodeURIComponent(`${artist} ${album}`);
+        const res = await axios.get(`https://itunes.apple.com/search?term=${query}&entity=album&limit=1`, { timeout: 4000 });
+        if (res.data && res.data.results && res.data.results.length > 0) {
+            const item = res.data.results[0];
+            if (item.artworkUrl100) {
+                const hdUrl = item.artworkUrl100.replace('100x100bb', '600x600bb');
+                hdCoverCache.set(cacheKey, hdUrl);
+                return hdUrl;
+            }
+        }
+    } catch (e) {}
+
+    hdCoverCache.set(cacheKey, currentCover);
+    return currentCover;
 }
 
 async function getBandcampData(artist, album) {
@@ -136,9 +177,15 @@ async function getBandcampData(artist, album) {
                     formattedTags = tags.slice(0, 3).map(t => t.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')).join(', ');
                 }
 
+                let hdImg = null;
+                if (bestMatch.img) {
+                    hdImg = bestMatch.img.replace(/_\d+\.jpg$/, '_10.jpg');
+                }
+
                 const result = {
                     url: cleanUrl,
-                    genre: formattedTags
+                    genre: formattedTags,
+                    hdCover: hdImg
                 };
                 bandcampCache.set(cacheKey, result);
                 return result;
@@ -148,7 +195,7 @@ async function getBandcampData(artist, album) {
         // ignore
     }
 
-    const empty = { url: null, genre: '' };
+    const empty = { url: null, genre: '', hdCover: null };
     bandcampCache.set(cacheKey, empty);
     return empty;
 }
@@ -250,7 +297,7 @@ function parseListHtml(html, listMeta, releasesMap, globalCounter) {
                     artistUrl,
                     title,
                     year: relDate,
-                    releaseDate: relDate, // will be enriched to GG/MM/AAAA
+                    releaseDate: relDate,
                     cover: coverSrc,
                     rymUrl,
                     bandcampUrl: null,
@@ -435,7 +482,7 @@ async function runScraper() {
 
     const isFirstRun = Object.keys(previousState).length === 0;
 
-    console.log('\n[4/4] Risoluzione date GG/MM/AAAA e interrogazione Bandcamp...');
+    console.log('\n[4/4] Arricchimento HD, Date GG/MM/AAAA e Bandcamp...');
     const batchSize = 15;
     for (let i = 0; i < allReleases.length; i += batchSize) {
         const chunk = allReleases.slice(i, i + batchSize);
@@ -446,11 +493,12 @@ async function runScraper() {
                 if (previousState[item.id].genre) item.genre = previousState[item.id].genre;
                 if (previousState[item.id].bandcampUrl) item.bandcampUrl = previousState[item.id].bandcampUrl;
                 if (previousState[item.id].releaseDate) item.releaseDate = previousState[item.id].releaseDate;
+                if (previousState[item.id].cover && !previousState[item.id].cover.includes('/i/150/')) item.cover = previousState[item.id].cover;
             } else {
                 item.isNew = !isFirstRun;
             }
 
-            // Bandcamp Data
+            // Bandcamp Data & HD Cover
             if (!item.bandcampUrl || !item.genre) {
                 const bcData = await getBandcampData(item.artist, item.title);
                 item.bandcampUrl = bcData.url;
@@ -460,6 +508,14 @@ async function runScraper() {
                     const artistTags = await getBandcampArtistTags(item.artist);
                     if (artistTags) item.genre = artistTags;
                 }
+                if (bcData.hdCover) {
+                    item.cover = bcData.hdCover;
+                }
+            }
+
+            // Upgrade cover to High Resolution if still low-res
+            if (item.cover.includes('/i/150/') || item.cover.includes('/i/75/')) {
+                item.cover = await getHDCover(item.artist, item.title, item.cover);
             }
 
             // Release Date (GG/MM/AAAA)
@@ -480,6 +536,7 @@ async function runScraper() {
             artistUrl: r.artistUrl,
             title: r.title,
             genre: r.genre,
+            cover: r.cover,
             releaseDate: r.releaseDate,
             bandcampUrl: r.bandcampUrl,
             latestItemId: r.latestItemId,
@@ -507,32 +564,32 @@ async function runScraper() {
     console.log(`=====================================================\n`);
 }
 
-// Quick enrich function for release dates
-async function enrichReleaseDates() {
+// Quick enrich function to upgrade existing dataset to HD covers
+async function enrichHDCovres() {
     if (!fs.existsSync(RELEASES_FILE)) return;
-    console.log('Risoluzione date di uscita GG/MM/AAAA per il dataset...');
+    console.log('Upgrade copertine in Alta Risoluzione (HD) per il dataset...');
     const releases = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8'));
 
-    const batchSize = 20;
+    const batchSize = 25;
     for (let i = 0; i < releases.length; i += batchSize) {
         const chunk = releases.slice(i, i + batchSize);
         await Promise.all(chunk.map(async (item) => {
-            if (!item.releaseDate || /^\d{4}$/.test(item.releaseDate)) {
-                item.releaseDate = await getFullReleaseDate(item.artist, item.title, item.year);
+            if (item.cover.includes('/i/150/') || item.cover.includes('/i/75/')) {
+                item.cover = await getHDCover(item.artist, item.title, item.cover);
             }
         }));
         if ((i + batchSize) % 300 === 0 || i + batchSize >= releases.length) {
-            console.log(`Elaborate date per ${Math.min(i + batchSize, releases.length)} / ${releases.length} album...`);
+            console.log(`Copertine HD elaborate: ${Math.min(i + batchSize, releases.length)} / ${releases.length}...`);
         }
     }
 
     fs.writeFileSync(RELEASES_FILE, JSON.stringify(releases, null, 2), 'utf8');
     const html = generateHtml(releases, { lastUpdated: new Date().toLocaleString('it-IT') });
     fs.writeFileSync(OUTPUT_HTML, html, 'utf8');
-    console.log('Dataset e index.html aggiornati con le date di uscita GG/MM/AAAA!');
+    console.log('Tutte le copertine sono state aggiornate in Alta Risoluzione HD!');
 }
 
-module.exports = { runScraper, enrichReleaseDates, getFullReleaseDate, getBandcampData, getBandcampArtistTags };
+module.exports = { runScraper, enrichHDCovres, getHDCover, getFullReleaseDate, getBandcampData, getBandcampArtistTags };
 
 if (require.main === module) {
     runScraper().catch(console.error);
