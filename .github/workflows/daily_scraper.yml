@@ -1,19 +1,12 @@
-name: Daily RateYourMusic Scraper
+name: Manual Scraper Trigger
 
 on:
-  schedule:
-    # Runs every day at 03:00 UTC (05:00 Rome CEST / 04:00 Rome CET)
-    - cron: '0 3 * * *'
-  workflow_dispatch: # Allows manual trigger anytime from GitHub website
+  workflow_dispatch: # Permette l'avvio solo manuale se richiesto
 
 permissions:
   contents: write
   pages: write
   id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
   scrape_and_deploy:
@@ -45,14 +38,3 @@ jobs:
           git add data/ index.html target_lists.json
           git diff --staged --quiet || git commit -m "Auto-update RateYourMusic releases [skip ci]"
           git push
-
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact for GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: '.'
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
